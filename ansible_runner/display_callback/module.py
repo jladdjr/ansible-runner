@@ -85,6 +85,7 @@ class BaseCallbackModule(CallbackBase):
             for i, item in enumerate(event_data['res'].get('results', [])):
                 if isinstance(item, dict) and item.get('_ansible_no_log', False):
                     event_data['res']['results'][i] = {'censored': CENSORED}
+                    event_data['res']['results']['foo'] = 'bar'
 
         with event_context.display_lock:
             try:
@@ -326,7 +327,7 @@ class BaseCallbackModule(CallbackBase):
             dark=stats.dark,
             failures=stats.failures,
             ignored=getattr(stats, 'ignored', 0),
-            ok=stats.ok,
+            ok=42,
             processed=stats.processed,
             rescued=getattr(stats, 'rescued', 0),
             skipped=stats.skipped,
