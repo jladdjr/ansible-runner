@@ -87,7 +87,41 @@ class RunnerConfig(object):
                  tags=None, skip_tags=None, fact_cache_type='jsonfile', fact_cache=None, ssh_key=None,
                  project_dir=None, directory_isolation_base_path=None, envvars=None, forks=None, cmdline=None, omit_event_data=False,
                  only_failed_event_data=False):
-        self.private_data_dir = os.path.abspath(private_data_dir)
+        # preload settings from settings file
+        # in order to determine if containerization is enabled
+        self.loader = ArtifactLoader(os.path.abspath(private_data_dir))
+        try:
+            self.settings = self.loader.load_file('env/settings', Mapping)
+        except ConfigurationError:
+            output.debug("Not loading settings")
+            self.settings = dict()
+
+        # determine execution context before handling other args
+        # (allows us key off of self.containerized, self.sandboxed) 
+        #
+        # we look ahead at settings in the settings file for 
+        # the key options that determine if containerization is enabled
+        self.process_isolation = self.settings.get('process_isolation', process_isolation)
+        self.process_isolation_executable = self.settings.get('process_isolation_executable', process_isolation_executable)
+        self.process_isolation_path = process_isolation_path
+        self.process_isolation_path_actual = None
+        self.process_isolation_hide_paths = process_isolation_hide_paths
+        self.process_isolation_show_paths = process_isolation_show_paths
+        self.process_isolation_ro_paths = process_isolation_ro_paths
+        self.container_image = container_image
+        self.container_volume_mounts = container_volume_mounts
+        self.container_options = container_options
+
+        # When execution happens inside of a container
+        # the container mounts the private_data_dir to /runner
+        # * save the _host_ private_data_dir for reference
+        # * but go ahead and set the private_data_dir to /runner
+        #   so that all other paths can get set relative to this
+        self.host_private_data_dir = os.path.abspath(private_data_dir)
+        if self.containerized:
+            self.private_data_dir = '/runner'
+        else:
+            self.private_data_dir = os.path.abspath(private_data_dir)
         self.ident = str(ident)
         self.json_mode = json_mode
         self.playbook = playbook
@@ -99,27 +133,21 @@ class RunnerConfig(object):
         self.host_pattern = host_pattern
         self.binary = binary
         self.rotate_artifacts = rotate_artifacts
-        self.artifact_dir = os.path.abspath(artifact_dir or self.private_data_dir)
 
-        if artifact_dir is None:
-            self.artifact_dir = os.path.join(self.private_data_dir, 'artifacts')
+        if self.containerized:
+            self.host_artifact_dir = os.path.join(self.host_private_data_dir, f'artifacts/{self.ident}')
+            self.artifact_dir = f'/runner/artifacts/{self.ident}'
         else:
-            self.artifact_dir = os.path.abspath(artifact_dir)
+            self.artifact_dir = os.path.abspath(artifact_dir or self.private_data_dir)
+            if artifact_dir is None:
+                self.artifact_dir = os.path.join(self.private_data_dir, 'artifacts')
+            else:
+                self.artifact_dir = os.path.abspath(artifact_dir)
 
-        if self.ident is not None:
-            self.artifact_dir = os.path.join(self.artifact_dir, "{}".format(self.ident))
+            if self.ident is not None:
+                self.artifact_dir = os.path.join(self.artifact_dir, "{}".format(self.ident))
 
         self.extra_vars = extravars
-        self.process_isolation = process_isolation
-        self.process_isolation_executable = process_isolation_executable
-        self.process_isolation_path = process_isolation_path
-        self.process_isolation_path_actual = None
-        self.process_isolation_hide_paths = process_isolation_hide_paths
-        self.process_isolation_show_paths = process_isolation_show_paths
-        self.process_isolation_ro_paths = process_isolation_ro_paths
-        self.container_image = container_image
-        self.container_volume_mounts = container_volume_mounts
-        self.container_options = container_options
         self.resource_profiling = resource_profiling
         self.resource_profiling_base_cgroup = resource_profiling_base_cgroup
         self.resource_profiling_cpu_poll_interval = resource_profiling_cpu_poll_interval
@@ -135,7 +163,6 @@ class RunnerConfig(object):
         self.verbosity = verbosity
         self.quiet = quiet
         self.suppress_ansible_output = suppress_ansible_output
-        self.loader = ArtifactLoader(self.private_data_dir)
         self.tags = tags
         self.skip_tags = skip_tags
         self.fact_cache_type = fact_cache_type
@@ -176,8 +203,12 @@ class RunnerConfig(object):
             raise ConfigurationError("Runner Base Directory is not defined")
         if self.module and self.playbook:
             raise ConfigurationError("Only one of playbook and module options are allowed")
-        if not os.path.exists(self.artifact_dir):
-            os.makedirs(self.artifact_dir, mode=0o700)
+        if self.containerized:
+            artifact_dir = self.host_artifact_dir
+        else:
+            artifact_dir = self.artifact_dir
+        if not os.path.exists(artifact_dir):
+            os.makedirs(artifact_dir, mode=0o700)
         if self.sandboxed and self.directory_isolation_path is not None:
             self.directory_isolation_path = tempfile.mkdtemp(prefix='runner_di_', dir=self.directory_isolation_path)
             if os.path.exists(self.project_dir):
@@ -280,8 +311,11 @@ class RunnerConfig(object):
         """
         Prepares the inventory default under ``private_data_dir`` if it's not overridden by the constructor.
         """
+        # As mentioned earlier, if we're running inside of a container
+        # then the private_data_dir on the host will get mapped to
+        # /runner inside of the container
         if self.containerized:
-            self.inventory = '/runner/inventory/hosts'
+            self.inventory = '/runner/inventory'
             return
 
         if self.inventory is None:
@@ -321,11 +355,8 @@ class RunnerConfig(object):
             output.debug("Not loading environment vars")
             # Still need to pass default environment to pexpect
 
-        try:
-            self.settings = self.loader.load_file('env/settings', Mapping)
-        except ConfigurationError:
-            output.debug("Not loading settings")
-            self.settings = dict()
+        # preloaded settings from env/settings in __init__
+        # in order to determine if containerization is enabled
 
         try:
             if self.ssh_key_data is None:
@@ -360,13 +391,16 @@ class RunnerConfig(object):
         self.suppress_ansible_output = self.settings.get('suppress_ansible_output', self.quiet)
 
 
-        if 'AD_HOC_COMMAND_ID' in self.env or not os.path.exists(self.project_dir):
-            self.cwd = self.private_data_dir
+        if self.containerized:
+            self.cwd = self.host_private_data_dir
         else:
-            if self.directory_isolation_path is not None:
-                self.cwd = self.directory_isolation_path
+            if 'AD_HOC_COMMAND_ID' in self.env or not os.path.exists(self.project_dir):
+                self.cwd = self.private_data_dir
             else:
-                self.cwd = self.project_dir
+                if self.directory_isolation_path is not None:
+                    self.cwd = self.directory_isolation_path
+                else:
+                    self.cwd = self.project_dir
 
         if 'fact_cache' in self.settings:
             if 'fact_cache_type' in self.settings:
@@ -572,8 +606,8 @@ class RunnerConfig(object):
         # .. using Z to modify the selinux label of the _host_ file / directory
         # (see https://docs.docker.com/storage/bind-mounts/#configure-the-selinux-label
         #  for usage and potential side-effects)
-        _ensure_path_safe_to_mount(self.private_data_dir)
-        new_args.extend(["-v", "{}:/runner:Z".format(self.private_data_dir)])
+        _ensure_path_safe_to_mount(self.host_private_data_dir)
+        new_args.extend(["-v", "{}:/runner:Z".format(self.host_private_data_dir)])
 
         container_volume_mounts = self.container_volume_mounts
         if container_volume_mounts:
@@ -582,7 +616,17 @@ class RunnerConfig(object):
                 _ensure_path_safe_to_mount(host_path)
                 new_args.extend(["-v", "{}:{}:Z".format(host_path, container_path)])
 
-        env_var_whitelist = ['PROJECT_UPDATE_ID']
+        env_var_whitelist = ['PROJECT_UPDATE_ID',
+                             'ANSIBLE_STDOUT_CALLBACK',
+                             'ANSIBLE_CALLBACK_PLUGINS']
+        env_var_whitelist = ['ANSIBLE_CACHE_PLUGIN',
+                             'ANSIBLE_CACHE_PLUGIN_CONNECTION',
+                             'ANSIBLE_CALLBACK_PLUGINS',
+                             'ANSIBLE_DEBUG',
+                             'ANSIBLE_HOST_KEY_CHECKING',
+                             'ANSIBLE_RETRY_FILES_ENABLED',
+                             'ANSIBLE_STDOUT_CALLBACK',
+                             'AWX_ISOLATED_DATA_DIR']
         for k, v in self.env.items():
             if k in env_var_whitelist:
                 new_args.extend(["-e", "{}={}".format(k, v)])

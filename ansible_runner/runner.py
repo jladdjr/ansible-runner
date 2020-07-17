@@ -45,13 +45,17 @@ class Runner(object):
         Invoked for every Ansible event to collect stdout with the event data and store it for
         later use
         '''
+        if self.config.containerized:
+            artifact_dir = self.config.host_artifact_dir
+        else:
+            artifact_dir = self.config.artifact_dir
         self.last_stdout_update = time.time()
         if 'uuid' in event_data:
             filename = '{}-partial.json'.format(event_data['uuid'])
-            partial_filename = os.path.join(self.config.artifact_dir,
+            partial_filename = os.path.join(artifact_dir,
                                             'job_events',
                                             filename)
-            full_filename = os.path.join(self.config.artifact_dir,
+            full_filename = os.path.join(artifact_dir,
                                          'job_events',
                                          '{}-{}.json'.format(event_data['counter'],
                                                              event_data['uuid']))
@@ -92,19 +96,31 @@ class Runner(object):
         invocation is complete
         '''
         self.status_callback('starting')
-        stdout_filename = os.path.join(self.config.artifact_dir, 'stdout')
-        command_filename = os.path.join(self.config.artifact_dir, 'command')
+        if self.config.containerized:
+            stdout_filename = os.path.join(self.config.host_artifact_dir, 'stdout')
+            command_filename = os.path.join(self.config.host_artifact_dir, 'command')
+        else:
+            stdout_filename = os.path.join(self.config.artifact_dir, 'stdout')
+            command_filename = os.path.join(self.config.artifact_dir, 'command')
 
         try:
-            os.makedirs(self.config.artifact_dir, mode=0o700)
+            if self.config.containerized:
+                artifact_dir = self.config.host_artifact_dir
+            else:
+                artifact_dir = self.config.artifact_dir
+            if not os.path.exists(artifact_dir):
+                os.makedirs(artifact_dir, mode=0o700)
         except OSError as exc:
-            if exc.errno == errno.EEXIST and os.path.isdir(self.config.artifact_dir):
+            if exc.errno == errno.EEXIST and os.path.isdir(artifact_dir):
                 pass
             else:
                 raise
         os.close(os.open(stdout_filename, os.O_CREAT, stat.S_IRUSR | stat.S_IWUSR))
 
-        job_events_path = os.path.join(self.config.artifact_dir, 'job_events')
+        if self.config.containerized:
+            job_events_path = os.path.join(self.config.host_artifact_dir, 'job_events')
+        else:
+            job_events_path = os.path.join(self.config.artifact_dir, 'job_events')
         if not os.path.exists(job_events_path):
             os.mkdir(job_events_path, 0o700)
 
@@ -121,7 +137,10 @@ class Runner(object):
             )
 
         if self.config.ident is not None:
-            cleanup_artifact_dir(os.path.join(self.config.artifact_dir, ".."), self.config.rotate_artifacts)
+            if self.config.containerized:
+                cleanup_artifact_dir(os.path.join(self.config.host_artifact_dir, ".."), self.config.rotate_artifacts)
+            else:
+                cleanup_artifact_dir(os.path.join(self.config.artifact_dir, ".."), self.config.rotate_artifacts)
 
         stdout_handle = codecs.open(stdout_filename, 'w', encoding='utf-8')
         stdout_handle = OutputEventFilter(stdout_handle, self.event_callback, self.config.suppress_ansible_output, output_json=self.config.json_mode)
@@ -193,7 +212,7 @@ class Runner(object):
 
             # create the events directory (the callback plugin won't run, so it
             # won't get created)
-            events_directory = os.path.join(self.config.artifact_dir, 'job_events')
+            events_directory = os.path.join(artifact_dir, 'job_events')
             if not os.path.exists(events_directory):
                 os.mkdir(events_directory, 0o700)
             stdout_handle.write(_decode(str(e)))
@@ -239,11 +258,15 @@ class Runner(object):
         else:
             self.status_callback('failed')
         self.rc = child.exitstatus if not (self.timed_out or self.canceled) else 254
+        if self.config.containerized:
+            artifact_dir = self.config.host_artifact_dir
+        else:
+            artifact_dir = self.config.artifact_dir
         for filename, data in [
             ('status', self.status),
             ('rc', self.rc),
         ]:
-            artifact_path = os.path.join(self.config.artifact_dir, filename)
+            artifact_path = os.path.join(artifact_dir, filename)
             if not os.path.exists(artifact_path):
                 os.close(os.open(artifact_path, os.O_CREAT, stat.S_IRUSR | stat.S_IWUSR))
             with open(artifact_path, 'w') as f:

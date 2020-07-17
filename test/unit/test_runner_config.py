@@ -137,14 +137,17 @@ def test_prepare_env_settings_defaults():
 
 
 def test_prepare_env_settings():
-    rc = RunnerConfig('/')
+    loader = ArtifactLoader('/')
+    with patch('__main__.ArtifactLoader') as mock_loader:
+        mock_loader.return_value = loader
 
-    value = {'test': 'string'}
-    settings_side_effect = partial(load_file_side_effect, 'env/settings', value)
+        value = {'test': 'string'}
+        settings_side_effect = partial(load_file_side_effect, 'env/settings', value)
+        with patch.object(loader, 'load_file', side_effect=settings_side_effect):
+            rc = RunnerConfig('/')
+            rc.prepare_env()
+            assert rc.settings == value
 
-    with patch.object(rc.loader, 'load_file', side_effect=settings_side_effect):
-        rc.prepare_env()
-        assert rc.settings == value
 
 
 def test_prepare_env_sshkey_defaults():
@@ -596,13 +599,12 @@ def test_profiling_plugin_settings_with_custom_intervals(mock_mkdir):
 @patch('os.mkdir', return_value=True)
 @pytest.mark.parametrize('container_runtime', ['docker', 'podman'])
 def test_containerization_settings(mock_mkdir, container_runtime):
-    rc = RunnerConfig('/')
-    rc.playbook = 'main.yaml'
-    rc.command = 'ansible-playbook'
-    rc.process_isolation = True
-    rc.process_isolation_executable=container_runtime
-    rc.container_image = 'my_container'
-    rc.container_volume_mounts=['/host1:/container1', 'host2:/container2']
+    rc = RunnerConfig(private_data_dir='/',
+                      playbook='main.yaml',
+                      process_isolation=True,
+                      process_isolation_executable=container_runtime,
+                      container_image='my_container',
+                      container_volume_mounts=['/host1:/container1', 'host2:/container2'])
     rc.prepare()
 
     extra_container_args = []
@@ -612,11 +614,18 @@ def test_containerization_settings(mock_mkdir, container_runtime):
         extra_container_args = ['--user={os.getuid()}']
 
     expected_command_start = [container_runtime, 'run', '--rm', '--tty', '--interactive', '--workdir', '/runner/project'] + \
-        ['-v', '{}:/runner:Z'.format(rc.private_data_dir)] + \
+        ['-v', '/:/runner:Z'] + \
         ['-v', '/host1:/container1:Z', '-v', 'host2:/container2:Z'] + \
+        ['-e', 'ANSIBLE_HOST_KEY_CHECKING=False'] + \
+        ['-e', 'ANSIBLE_CALLBACK_PLUGINS=/usr/lib/python3.6/site-packages/ansible_runner/callbacks'] + \
+        ['-e', 'ANSIBLE_STDOUT_CALLBACK=awx_display'] + \
+        ['-e', 'ANSIBLE_RETRY_FILES_ENABLED=False'] + \
+        ['-e', f'AWX_ISOLATED_DATA_DIR=/runner/artifacts/{rc.ident}'] + \
+        ['-e', 'ANSIBLE_CACHE_PLUGIN=jsonfile'] + \
+        ['-e', f'ANSIBLE_CACHE_PLUGIN_CONNECTION=/runner/artifacts/{rc.ident}/fact_cache'] + \
         extra_container_args + \
         ['-e', 'AWX_ISOLATED_DATA_DIR=/runner/artifacts/{}'.format(rc.ident)] + \
-        ['my_container', 'ansible-playbook', '-i', '/runner/inventory/hosts', 'main.yaml']
+        ['my_container', 'ansible-playbook', '-i', '/runner/inventory', 'main.yaml']
     for index, element in enumerate(expected_command_start):
         if '--user' in element:
             assert '--user=' in rc.command[index]
