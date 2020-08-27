@@ -21,6 +21,16 @@ def test_playbook_run(cli, container_runtime_available):
 
 
 @pytest.mark.serial
+def test_provide_env_var(cli, container_runtime_available, test_data_dir):
+    if not container_runtime_available:
+        pytest.skip('container runtime(s) not available')
+    print(test_data_dir)
+    r = cli(['run', os.path.join(test_data_dir, 'job_env'), '-p', 'printenv.yml'])
+    print(r.stdout)
+    assert 'gifmyvqok2' in r.stdout
+
+
+@pytest.mark.serial
 def test_adhoc_localhost_setup(cli, container_runtime_available, container_runtime_installed):
     if not container_runtime_available:
         pytest.skip('container runtime(s) not available')
